@@ -2407,20 +2407,32 @@ function registerCommands() {
 
 /**
  * Initialize the extension
+ *
+ * IMPORTANT: Event listeners must be registered synchronously (no awaits before them)
+ * to avoid race conditions where APP_READY fires before listeners are registered.
  */
-jQuery(async () => {
-    // Check SillyTavern version
-    const response = await fetch('/version');
-    const version = await response.json();
-    const [major, minor] = version.pkgVersion.split('.').map(Number);
-
-    if (minor < 13) {
-        toastr.error('OpenVault requires SillyTavern 1.13.0 or later', 'OpenVault');
-        return;
-    }
+jQuery(() => {
+    // Register event listeners IMMEDIATELY (synchronously) to avoid race conditions
+    // The APP_READY event may fire before async operations complete
 
     // Initialize on app ready
     eventSource.on(event_types.APP_READY, async () => {
+        // Check SillyTavern version inside the handler (after listener is registered)
+        try {
+            const response = await fetch('/version');
+            const version = await response.json();
+            const [major, minor] = version.pkgVersion.split('.').map(Number);
+
+            if (minor < 13) {
+                toastr.error('OpenVault requires SillyTavern 1.13.0 or later', 'OpenVault');
+                return;
+            }
+        } catch (error) {
+            console.error('[OpenVault] Failed to check SillyTavern version:', error);
+            toastr.error('OpenVault failed to verify SillyTavern version', 'OpenVault');
+            return;
+        }
+
         await loadSettings();
         registerCommands();
 
