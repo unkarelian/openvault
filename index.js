@@ -628,6 +628,14 @@ async function handleOpenVaultSend() {
         return;
     }
 
+    // Skip retrieval for slash commands - they don't trigger AI generation
+    const textareaValue = String($('#send_textarea').val()).trim();
+    if (textareaValue.startsWith('/')) {
+        log('>>> Skipping retrieval - slash command detected');
+        await sendTextareaMessage();
+        return;
+    }
+
     // Skip if already generating
     if (operationState.generationInProgress) {
         log('Skipping - generation already in progress');
