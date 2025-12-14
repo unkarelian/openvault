@@ -672,6 +672,9 @@ async function onBeforeGeneration(type, options, dryRun = false) {
         const lastUserMessage = [...chat].reverse().find(m => m.is_user && !m.is_system);
         const pendingUserMessage = lastUserMessage?.mes || '';
 
+        // Show toast notification during retrieval
+        toastr.info('Retrieving memories...', 'OpenVault', { timeOut: 2000 });
+
         // Do memory retrieval before generation
         log(`>>> Pre-generation retrieval starting (type: ${type}, message: "${pendingUserMessage.substring(0, 50)}...")`);
         await withTimeout(
