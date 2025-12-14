@@ -135,9 +135,12 @@ export async function retrieveAndInjectContext() {
         // Get relationship context for the primary character
         const relationshipContext = getRelationshipContext(data, primaryCharacter, activeCharacters);
 
-        // Get emotional state of primary character
+        // Get emotional state of primary character (with message range info)
         const primaryCharState = data[CHARACTERS_KEY]?.[primaryCharacter];
-        const emotionalState = primaryCharState?.current_emotion || 'neutral';
+        const emotionalInfo = {
+            emotion: primaryCharState?.current_emotion || 'neutral',
+            fromMessages: primaryCharState?.emotion_from_messages || null,
+        };
 
         // Format header based on mode
         const headerName = isGroupChat ? primaryCharacter : 'Scene';
@@ -146,7 +149,7 @@ export async function retrieveAndInjectContext() {
         const formattedContext = formatContextForInjection(
             relevantMemories,
             relationshipContext,
-            emotionalState,
+            emotionalInfo,
             headerName,
             settings.tokenBudget
         );
@@ -293,10 +296,13 @@ export async function updateInjection(pendingUserMessage = '') {
         return;
     }
 
-    // Get relationship and emotional context
+    // Get relationship and emotional context (with message range info)
     const relationshipContext = getRelationshipContext(data, primaryCharacter, activeCharacters);
     const primaryCharState = data[CHARACTERS_KEY]?.[primaryCharacter];
-    const emotionalState = primaryCharState?.current_emotion || 'neutral';
+    const emotionalInfo = {
+        emotion: primaryCharState?.current_emotion || 'neutral',
+        fromMessages: primaryCharState?.emotion_from_messages || null,
+    };
 
     // Format header based on mode
     const headerName = isGroupChat ? primaryCharacter : 'Scene';
@@ -305,7 +311,7 @@ export async function updateInjection(pendingUserMessage = '') {
     const formattedContext = formatContextForInjection(
         relevantMemories,
         relationshipContext,
-        emotionalState,
+        emotionalInfo,
         headerName,
         settings.tokenBudget
     );

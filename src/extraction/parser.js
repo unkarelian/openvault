@@ -64,6 +64,12 @@ export function updateCharacterStatesFromEvents(events, data) {
     data[CHARACTERS_KEY] = data[CHARACTERS_KEY] || {};
 
     for (const event of events) {
+        // Get message range for this event
+        const messageIds = event.message_ids || [];
+        const messageRange = messageIds.length > 0
+            ? { min: Math.min(...messageIds), max: Math.max(...messageIds) }
+            : null;
+
         // Update emotional impact
         if (event.emotional_impact) {
             for (const [charName, emotion] of Object.entries(event.emotional_impact)) {
@@ -76,9 +82,12 @@ export function updateCharacterStatesFromEvents(events, data) {
                     };
                 }
 
-                // Update emotion
+                // Update emotion and track which messages it's from
                 data[CHARACTERS_KEY][charName].current_emotion = emotion;
                 data[CHARACTERS_KEY][charName].last_updated = Date.now();
+                if (messageRange) {
+                    data[CHARACTERS_KEY][charName].emotion_from_messages = messageRange;
+                }
             }
         }
 

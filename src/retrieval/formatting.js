@@ -43,12 +43,12 @@ export function getRelationshipContext(data, povCharacter, activeCharacters) {
  * Format context for injection into prompt
  * @param {Object[]} memories - Selected memories
  * @param {Object[]} relationships - Relevant relationships
- * @param {string} emotionalState - Current emotional state
+ * @param {Object} emotionalInfo - Emotional state info { emotion, fromMessages }
  * @param {string} characterName - Character name for header
  * @param {number} tokenBudget - Maximum token budget
  * @returns {string} Formatted context string
  */
-export function formatContextForInjection(memories, relationships, emotionalState, characterName, tokenBudget) {
+export function formatContextForInjection(memories, relationships, emotionalInfo, characterName, tokenBudget) {
     const lines = [];
 
     // Get current message number for context
@@ -59,9 +59,19 @@ export function formatContextForInjection(memories, relationships, emotionalStat
     lines.push(`(Current message: #${currentMessageNum})`);
     lines.push('');
 
-    // Emotional state
-    if (emotionalState && emotionalState !== 'neutral') {
-        lines.push(`Current emotional state: ${emotionalState}`);
+    // Emotional state - handle both old string format and new object format
+    const emotion = typeof emotionalInfo === 'string' ? emotionalInfo : emotionalInfo?.emotion;
+    const fromMessages = typeof emotionalInfo === 'object' ? emotionalInfo?.fromMessages : null;
+
+    if (emotion && emotion !== 'neutral') {
+        let emotionLine = `Emotional state: ${emotion}`;
+        if (fromMessages) {
+            const { min, max } = fromMessages;
+            emotionLine += min === max
+                ? ` (as of msg #${min})`
+                : ` (as of msgs #${min}-${max})`;
+        }
+        lines.push(emotionLine);
         lines.push('');
     }
 
@@ -130,7 +140,7 @@ export function formatContextForInjection(memories, relationships, emotionalStat
         }
 
         // Rebuild with truncated memories
-        return formatContextForInjection(truncatedMemories, relationships, emotionalState, characterName, tokenBudget * 2);
+        return formatContextForInjection(truncatedMemories, relationships, emotionalInfo, characterName, tokenBudget * 2);
     }
 
     return result;

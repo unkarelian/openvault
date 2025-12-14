@@ -213,11 +213,20 @@ export function renderCharacterStates() {
         const intensity = char.emotion_intensity || 5;
         const knownCount = char.known_events?.length || 0;
 
+        // Format message range for emotion source
+        let emotionSource = '';
+        if (char.emotion_from_messages) {
+            const { min, max } = char.emotion_from_messages;
+            emotionSource = min === max
+                ? ` (msg ${min})`
+                : ` (msgs ${min}-${max})`;
+        }
+
         $container.append(`
             <div class="openvault-character-item">
                 <div class="openvault-character-name">${escapeHtml(name)}</div>
                 <div class="openvault-emotion">
-                    <span class="openvault-emotion-label">${escapeHtml(emotion)}</span>
+                    <span class="openvault-emotion-label">${escapeHtml(emotion)}${emotionSource}</span>
                     <div class="openvault-emotion-bar">
                         <div class="openvault-emotion-fill" style="width: ${intensity * 10}%"></div>
                     </div>
