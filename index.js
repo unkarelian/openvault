@@ -7,7 +7,7 @@
  * All data is stored in chatMetadata - no external services required.
  */
 
-import { eventSource, event_types, saveSettingsDebounced, saveChatConditional, setExtensionPrompt, extension_prompt_types, sendTextareaMessage } from "../../../../script.js";
+import { eventSource, event_types, saveSettingsDebounced, saveChatConditional, setExtensionPrompt, extension_prompt_types } from "../../../../script.js";
 import { extension_settings, getContext, loadExtensionSettings } from "../../../extensions.js";
 import { executeSlashCommandsWithOptions } from "../../../slash-commands.js";
 import { ConnectionManagerRequestService } from "../../shared.js";
@@ -55,10 +55,6 @@ const RETRIEVAL_TIMEOUT_MS = 30000; // 30 seconds max for retrieval
 const GENERATION_LOCK_TIMEOUT_MS = 120000; // 2 minutes safety timeout
 
 let generationLockTimeout = null;
-
-// Input interceptor state
-let inputInterceptorInstalled = false;
-let enterKeyHandler = null;
 
 // Chat loading state - prevents operations during initial chat load
 // Start with cooldown active to prevent any operations before APP_READY completes
@@ -155,11 +151,10 @@ async function loadSettings() {
     extension_settings[extensionName] = extension_settings[extensionName] || {};
 
     // Apply defaults for any missing settings
-    for (const [key, value] of Object.entries(defaultSettings)) {
-        if (extension_settings[extensionName][key] === undefined) {
-            extension_settings[extensionName][key] = value;
-        }
-    }
+    Object.assign(extension_settings[extensionName], {
+        ...defaultSettings,
+        ...extension_settings[extensionName],
+    });
 
     // Load HTML template
     const settingsHtml = await $.get(`${extensionFolderPath}/templates/settings_panel.html`);
@@ -634,29 +629,25 @@ async function autoHideOldMessages() {
 }
 
 /**
- * Handle OpenVault send - does memory retrieval before triggering generation
- * This is the core function that intercepts user input
+ * Handle pre-generation event (GENERATION_AFTER_COMMANDS)
+ * This is the proper way to intercept before AI generation starts.
+ * Fires after slash commands are parsed but before the actual LLM call.
+ *
+ * @param {string} type - Generation type ('normal', 'regenerate', 'swipe', 'continue', etc.)
+ * @param {object} options - Generation options
+ * @param {boolean} dryRun - If true, don't actually do retrieval (used for token counting)
  */
-async function handleOpenVaultSend() {
+async function onBeforeGeneration(type, options, dryRun = false) {
     const settings = extension_settings[extensionName];
 
-    // If OpenVault disabled or manual mode, just send normally
-    if (!settings.enabled || !settings.automaticMode) {
-        await sendTextareaMessage();
+    // Skip if disabled, manual mode, or dry run
+    if (!settings.enabled || !settings.automaticMode || dryRun) {
         return;
     }
 
-    // Skip retrieval for slash commands - they don't trigger AI generation
-    const textareaValue = String($('#send_textarea').val()).trim();
-    if (textareaValue.startsWith('/')) {
-        log('>>> Skipping retrieval - slash command detected');
-        await sendTextareaMessage();
-        return;
-    }
-
-    // Skip if already generating
+    // Skip if already generating (prevent re-entry)
     if (operationState.generationInProgress) {
-        log('Skipping - generation already in progress');
+        log('Skipping retrieval - generation already in progress');
         return;
     }
 
@@ -669,103 +660,33 @@ async function handleOpenVaultSend() {
         const memories = data[MEMORIES_KEY] || [];
         if (memories.length === 0) {
             log('>>> Skipping retrieval - no memories yet');
-            await sendTextareaMessage();
             return;
         }
 
         setStatus('retrieving');
+        setGenerationLock();
 
-        // Get pending user message for context-aware retrieval
-        const pendingUserMessage = String($('#send_textarea').val()).trim();
+        // Get context for retrieval - use the last user message if available
+        const context = getContext();
+        const chat = context.chat || [];
+        const lastUserMessage = [...chat].reverse().find(m => m.is_user && !m.is_system);
+        const pendingUserMessage = lastUserMessage?.mes || '';
 
-        // Do memory retrieval BEFORE generation starts
-        log(`>>> Pre-send retrieval starting (message: "${pendingUserMessage.substring(0, 50)}...")`);
+        // Do memory retrieval before generation
+        log(`>>> Pre-generation retrieval starting (type: ${type}, message: "${pendingUserMessage.substring(0, 50)}...")`);
         await withTimeout(
             updateInjection(pendingUserMessage),
             RETRIEVAL_TIMEOUT_MS,
             'Memory retrieval'
         );
-        log('>>> Pre-send retrieval complete');
+        log('>>> Pre-generation retrieval complete');
 
         setStatus('ready');
-
-        // Now trigger normal send
-        await sendTextareaMessage();
     } catch (error) {
-        console.error('OpenVault: Error during pre-send retrieval:', error);
+        console.error('OpenVault: Error during pre-generation retrieval:', error);
         setStatus('error');
-        // Still try to send even if retrieval failed
-        await sendTextareaMessage();
+        // Don't block generation on retrieval failure
     }
-}
-
-/**
- * Install input interceptors to capture Enter key and Send button clicks
- * This replaces the event listener approach with direct input interception
- */
-function installInputInterceptors() {
-    if (inputInterceptorInstalled) return;
-
-    const $sendButton = $('#send_but');
-    const textarea = document.getElementById('send_textarea');
-
-    if (!textarea) {
-        console.error('OpenVault: Could not find send_textarea element');
-        return;
-    }
-
-    // 1. Replace send button handler
-    $sendButton.off('click'); // Remove default handler
-    $sendButton.on('click', async function(e) {
-        e.preventDefault();
-        await handleOpenVaultSend();
-    });
-
-    // 2. Add Enter key interceptor (capture phase to run first)
-    enterKeyHandler = async function(e) {
-        // Only intercept Enter without modifiers (same as ST logic)
-        // Shift+Enter = newline, Ctrl+Enter = regenerate, etc.
-        if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
-            const settings = extension_settings[extensionName];
-            if (settings.enabled && settings.automaticMode) {
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                await handleOpenVaultSend();
-            }
-            // If disabled, let default handler run
-        }
-    };
-    textarea.addEventListener('keydown', enterKeyHandler, true); // capture phase
-
-    inputInterceptorInstalled = true;
-    log('Input interceptors installed');
-}
-
-/**
- * Remove input interceptors and restore default behavior
- * Note: This doesn't fully restore ST's original handler - that requires page reload
- */
-function removeInputInterceptors() {
-    if (!inputInterceptorInstalled) return;
-
-    const $sendButton = $('#send_but');
-    const textarea = document.getElementById('send_textarea');
-
-    // Remove our handlers
-    $sendButton.off('click');
-    if (enterKeyHandler && textarea) {
-        textarea.removeEventListener('keydown', enterKeyHandler, true);
-        enterKeyHandler = null;
-    }
-
-    // Reinstall a basic pass-through handler for the send button
-    // This ensures send still works after removal
-    $sendButton.on('click', async function() {
-        await sendTextareaMessage();
-    });
-
-    inputInterceptorInstalled = false;
-    log('Input interceptors removed');
 }
 
 /**
@@ -775,7 +696,7 @@ function removeInputInterceptors() {
 function updateEventListeners(skipInitialization = false) {
     const settings = extension_settings[extensionName];
 
-    // Remove old event listeners (no longer using GENERATION_AFTER_COMMANDS for main retrieval)
+    // Remove old event listeners first to prevent duplicates
     eventSource.removeListener(event_types.GENERATION_AFTER_COMMANDS, onBeforeGeneration);
     eventSource.removeListener(event_types.GENERATION_ENDED, onGenerationEnded);
     eventSource.removeListener(event_types.MESSAGE_RECEIVED, onMessageReceived);
@@ -790,28 +711,26 @@ function updateEventListeners(skipInitialization = false) {
         log('Warning: Settings changed during generation, keeping locks');
     }
 
-    // Install input interceptors (replaces GENERATION_AFTER_COMMANDS approach)
-    // Interceptors always installed - handleOpenVaultSend checks settings and passes through if disabled
-    installInputInterceptors();
-
     if (settings.enabled && settings.automaticMode) {
-        // Keep these event listeners for post-generation work
+        // Register event listeners for automatic mode
+        // GENERATION_AFTER_COMMANDS fires after slash commands but before LLM call
+        eventSource.on(event_types.GENERATION_AFTER_COMMANDS, onBeforeGeneration);
         eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
         eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
 
-        log('Automatic mode enabled - input interceptors installed');
+        log('Automatic mode enabled - event listeners registered');
 
         // Note: We intentionally do NOT call updateInjection() on initialization anymore.
-        // Retrieval will happen in handleOpenVaultSend() before each user message.
+        // Retrieval will happen in onBeforeGeneration() before each generation.
         // This prevents unwanted LLM calls (smart retrieval) when loading/switching chats.
         if (skipInitialization) {
             log('Skipping initialization (backfill mode) - retrieval will happen on next generation');
         }
     } else {
-        // Clear injection when disabled/manual (interceptors still pass through)
+        // Clear injection when disabled/manual
         setExtensionPrompt(extensionName, '', extension_prompt_types.IN_CHAT, 0);
-        log('Manual mode - interceptors pass-through, injection cleared');
+        log('Manual mode - injection cleared');
     }
 }
 
@@ -984,25 +903,6 @@ async function onMessageReceived(messageId) {
 }
 
 /**
- * Handle before-generation event (backup/fallback)
- *
- * NOTE: Main retrieval now happens in handleOpenVaultSend() via input interceptors.
- * This function is kept as a backup for cases where generation is triggered
- * without going through our interceptors (e.g., swipes, regenerates, or API calls).
- *
- * It now just sets the generation lock - retrieval was already done by the interceptor.
- */
-async function onBeforeGeneration(generationType, options = {}, isDryRun = false) {
-    const settings = extension_settings[extensionName];
-    if (!settings.enabled || !settings.automaticMode) return;
-    if (isDryRun) return;
-
-    // Set generation lock for all types (interceptor already did retrieval for 'normal')
-    setGenerationLock();
-    log(`>>> BEFORE_GENERATION (backup) [type=${generationType}] - retrieval already done by interceptor`);
-}
-
-/**
  * Extract memories from messages using LLM
  * @param {number[]} messageIds - Optional specific message IDs to extract
  */
@@ -1074,12 +974,8 @@ async function extractMemories(messageIds = null) {
 
         const extractionPrompt = buildExtractionPrompt(messagesText, characterName, userName, existingMemories, characterDescription, personaDescription);
 
-        // Call LLM for extraction
+        // Call LLM for extraction (throws on error)
         const extractedJson = await callLLMForExtraction(extractionPrompt);
-
-        if (!extractedJson) {
-            throw new Error('No extraction result from LLM');
-        }
 
         // Parse and store extracted events
         const events = parseExtractionResult(extractedJson, messagesToExtract, characterName, userName, batchId);
@@ -1230,6 +1126,9 @@ If no significant events, respond with an empty array: []`;
 
 /**
  * Call LLM for extraction using ConnectionManagerRequestService
+ * @param {string} prompt - The extraction prompt
+ * @returns {Promise<string>} The LLM response content
+ * @throws {Error} If the LLM call fails or no profile is available
  */
 async function callLLMForExtraction(prompt) {
     const settings = extension_settings[extensionName];
@@ -1247,9 +1146,8 @@ async function callLLMForExtraction(prompt) {
         }
     }
 
-    if (!profileId || !ConnectionManagerRequestService) {
-        log('No connection profile available for extraction');
-        return null;
+    if (!profileId) {
+        throw new Error('No connection profile available for extraction. Please configure a profile in Connection Manager.');
     }
 
     try {
@@ -1280,6 +1178,10 @@ async function callLLMForExtraction(prompt) {
         // Extract content from response
         const content = result?.content || result || '';
 
+        if (!content) {
+            throw new Error('Empty response from LLM');
+        }
+
         // Parse reasoning if present (some models return thinking tags)
         const context = getContext();
         if (context.parseReasoningFromString) {
@@ -1289,9 +1191,10 @@ async function callLLMForExtraction(prompt) {
 
         return content;
     } catch (error) {
-        log(`LLM call error: ${error.message}`);
-        toastr.error(`Extraction failed: ${error.message}`, 'OpenVault');
-        return null;
+        const errorMessage = error.message || 'Unknown error';
+        log(`LLM call error: ${errorMessage}`);
+        toastr.error(`Extraction failed: ${errorMessage}`, 'OpenVault');
+        throw error; // Re-throw to let caller handle it
     }
 }
 
@@ -1798,12 +1701,8 @@ ${numberedList}
 Only return valid JSON, no markdown formatting.`;
 
     try {
+        // Call LLM for extraction (throws on error)
         const response = await callLLMForExtraction(prompt);
-
-        if (!response) {
-            log('Smart retrieval: No response from LLM, falling back to simple mode');
-            return selectRelevantMemoriesSimple(memories, recentContext, characterName, [], limit);
-        }
 
         // Parse the response
         let parsed;
@@ -2408,16 +2307,13 @@ function registerCommands() {
 /**
  * Initialize the extension
  *
- * IMPORTANT: Event listeners must be registered synchronously (no awaits before them)
- * to avoid race conditions where APP_READY fires before listeners are registered.
+ * Uses jQuery DOM-ready pattern to self-initialize when the script loads.
+ * Event listeners are registered synchronously to avoid race conditions.
  */
 jQuery(() => {
-    // Register event listeners IMMEDIATELY (synchronously) to avoid race conditions
-    // The APP_READY event may fire before async operations complete
-
-    // Initialize on app ready
+    // Register APP_READY listener synchronously to avoid race conditions
     eventSource.on(event_types.APP_READY, async () => {
-        // Check SillyTavern version inside the handler (after listener is registered)
+        // Check SillyTavern version
         try {
             const response = await fetch('/version');
             const version = await response.json();
@@ -2451,7 +2347,7 @@ jQuery(() => {
         log('Extension initialized');
     });
 
-    // Handle chat changes
+    // Register CHAT_CHANGED handler for UI refresh
     eventSource.on(event_types.CHAT_CHANGED, async (chatId) => {
         if (!chatId) return;
         log(`Chat changed to: ${chatId}`);
